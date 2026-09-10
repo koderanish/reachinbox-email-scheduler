@@ -193,23 +193,40 @@ const worker = new Worker(
      * 5. SMTP send
      * ---------------------------------------------------------
      *
-     * ONLY SMTP-related failures are handled here.
+     * Ethereal uses SMTP with STARTTLS on port 587.
+     *
+     * The explicit timeouts prevent the worker from waiting
+     * several minutes when SMTP connectivity is unavailable.
      */
 
     let messageId: string;
     let previewUrl: string | false;
 
     try {
+      const smtpPort = Number(email.smtp_port);
+
       const transporter = nodemailer.createTransport({
         host: email.smtp_host,
-        port: email.smtp_port,
+        port: smtpPort,
+
+        // Ethereal SMTP on port 587 uses STARTTLS.
         secure: false,
+        requireTLS: true,
+
+        // Prevent long connection hangs.
+        connectionTimeout: 15000,
+        greetingTimeout: 15000,
+        socketTimeout: 30000,
 
         auth: {
           user: email.smtp_user,
           pass: email.smtp_password,
         },
       });
+
+      console.log(
+        `Connecting to SMTP ${email.smtp_host}:${smtpPort}`
+      );
 
       const info = await transporter.sendMail({
         from: email.sender_email,
@@ -220,6 +237,10 @@ const worker = new Worker(
 
       messageId = info.messageId;
       previewUrl = nodemailer.getTestMessageUrl(info);
+
+      console.log(
+        `SMTP accepted email ${emailId}`
+      );
 
     } catch (error) {
       const errorMessage =
@@ -276,6 +297,7 @@ const worker = new Worker(
        *
        * NEVER attempt another SMTP send.
        */
+
       console.error(
         `Email ${emailId} was sent by SMTP, ` +
           `but database state could not be updated. ` +
@@ -338,14 +360,17 @@ const worker = new Worker(
      */
 
     console.log("Email sent successfully!");
+
     console.log(
       "Recipient:",
       email.recipient_email
     );
+
     console.log(
       "Message ID:",
       messageId
     );
+
     console.log(
       "Preview URL:",
       previewUrl
