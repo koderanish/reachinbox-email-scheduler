@@ -357,7 +357,7 @@ export default function ComposePage() {
             senderId,
             subject: subject.trim(),
             body: body.trim(),
-            scheduledAt,
+            scheduledAt: new Date(scheduledAt).toISOString(),
             delaySeconds: Number(delaySeconds),
             hourlyLimit: Number(hourlyLimit),
             recipients,
