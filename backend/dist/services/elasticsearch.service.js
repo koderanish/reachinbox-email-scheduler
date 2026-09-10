@@ -12,44 +12,23 @@ async function createEmailIndex() {
     const exists = await elasticsearch_1.default.indices.exists({
         index: INDEX_NAME,
     });
-    if (exists.body)
+    if (exists) {
         return;
+    }
     await elasticsearch_1.default.indices.create({
         index: INDEX_NAME,
-        body: {
-            mappings: {
-                properties: {
-                    email_id: {
-                        type: "keyword",
-                    },
-                    user_id: {
-                        type: "keyword",
-                    },
-                    campaign_id: {
-                        type: "keyword",
-                    },
-                    recipient_email: {
-                        type: "keyword",
-                    },
-                    recipient_name: {
-                        type: "text",
-                    },
-                    subject: {
-                        type: "text",
-                    },
-                    body: {
-                        type: "text",
-                    },
-                    status: {
-                        type: "keyword",
-                    },
-                    scheduled_at: {
-                        type: "date",
-                    },
-                    sent_at: {
-                        type: "date",
-                    },
-                },
+        mappings: {
+            properties: {
+                email_id: { type: "keyword" },
+                user_id: { type: "keyword" },
+                campaign_id: { type: "keyword" },
+                recipient_email: { type: "keyword" },
+                recipient_name: { type: "text" },
+                subject: { type: "text" },
+                body: { type: "text" },
+                status: { type: "keyword" },
+                scheduled_at: { type: "date" },
+                sent_at: { type: "date" },
             },
         },
     });
@@ -59,7 +38,7 @@ async function indexEmail(email) {
     await elasticsearch_1.default.index({
         index: INDEX_NAME,
         id: email.id,
-        body: {
+        document: {
             email_id: email.id,
             user_id: email.user_id,
             campaign_id: email.campaign_id,
@@ -79,16 +58,13 @@ async function updateEmailIndex(emailId, data) {
         await elasticsearch_1.default.update({
             index: INDEX_NAME,
             id: emailId,
-            body: {
-                doc: data,
-            },
+            doc: data,
             refresh: "wait_for",
         });
     }
     catch (error) {
         if (error?.statusCode === 404) {
-            console.log(`Elasticsearch document ${emailId} not found. ` +
-                `Skipping index update.`);
+            console.log(`Elasticsearch document ${emailId} not found. Skipping index update.`);
             return;
         }
         throw error;

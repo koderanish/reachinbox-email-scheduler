@@ -25,8 +25,7 @@ async function getEmailsController(req, res) {
         const status = typeof req.query.status === "string"
             ? req.query.status.trim()
             : undefined;
-        if (status &&
-            !VALID_STATUSES.includes(status)) {
+        if (status && !VALID_STATUSES.includes(status)) {
             return res.status(400).json({
                 message: "status must be scheduled, sending, sent, or failed",
             });
@@ -58,8 +57,7 @@ async function searchEmails(req, res) {
         const status = typeof req.query.status === "string"
             ? req.query.status.trim()
             : "";
-        if (status &&
-            !VALID_STATUSES.includes(status)) {
+        if (status && !VALID_STATUSES.includes(status)) {
             return res.status(400).json({
                 message: "status must be scheduled, sending, sent, or failed",
             });
@@ -104,24 +102,22 @@ async function searchEmails(req, res) {
         };
         const result = await elasticsearch_1.default.search({
             index: INDEX_NAME,
-            body: {
-                query: searchQuery,
-                sort: [
-                    {
-                        scheduled_at: {
-                            order: "desc",
-                        },
+            query: searchQuery,
+            sort: [
+                {
+                    scheduled_at: {
+                        order: "desc",
                     },
-                ],
-            },
+                },
+            ],
         });
-        const hits = result.body.hits.hits;
+        const hits = result.hits.hits;
         const emails = hits.map((hit) => ({
             id: hit._id,
             ...hit._source,
         }));
         return res.status(200).json({
-            total: result.body.hits.total,
+            total: result.hits.total,
             emails,
         });
     }

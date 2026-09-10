@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+import { Response } from "express";
 import elasticsearch from "../config/elasticsearch";
 import { getEmails } from "../services/email.service";
 import { AuthenticatedRequest } from "../middleware/auth.middleware";
@@ -30,20 +30,14 @@ export async function getEmailsController(
         ? req.query.status.trim()
         : undefined;
 
-    if (
-      status &&
-      !VALID_STATUSES.includes(status)
-    ) {
+    if (status && !VALID_STATUSES.includes(status)) {
       return res.status(400).json({
         message:
           "status must be scheduled, sending, sent, or failed",
       });
     }
 
-    const emails = await getEmails(
-      userId,
-      status
-    );
+    const emails = await getEmails(userId, status);
 
     return res.status(200).json({
       count: emails.length,
@@ -81,10 +75,7 @@ export async function searchEmails(
         ? req.query.status.trim()
         : "";
 
-    if (
-      status &&
-      !VALID_STATUSES.includes(status)
-    ) {
+    if (status && !VALID_STATUSES.includes(status)) {
       return res.status(400).json({
         message:
           "status must be scheduled, sending, sent, or failed",
@@ -128,27 +119,23 @@ export async function searchEmails(
                 match_all: {},
               },
             ],
-
         filter: filters,
       },
     };
 
     const result = await elasticsearch.search({
       index: INDEX_NAME,
-      body: {
-        query: searchQuery,
-
-        sort: [
-          {
-            scheduled_at: {
-              order: "desc",
-            },
+      query: searchQuery,
+      sort: [
+        {
+          scheduled_at: {
+            order: "desc",
           },
-        ],
-      },
+        },
+      ],
     });
 
-    const hits = result.body.hits.hits;
+    const hits = result.hits.hits;
 
     const emails = hits.map((hit: any) => ({
       id: hit._id,
@@ -156,7 +143,7 @@ export async function searchEmails(
     }));
 
     return res.status(200).json({
-      total: result.body.hits.total,
+      total: result.hits.total,
       emails,
     });
   } catch (error) {
