@@ -18,6 +18,8 @@ const API_URL =
 type Sender = {
   id: string;
   email: string;
+  name?: string;
+  photoUrl?: string;
 };
 
 type Recipient = {
@@ -75,6 +77,7 @@ export default function ComposePage() {
 
   const [senders, setSenders] = useState<Sender[]>([]);
   const [senderId, setSenderId] = useState("");
+  const [showSenderMenu, setShowSenderMenu] = useState(false);
 
   const [recipients, setRecipients] = useState<Recipient[]>([]);
   const [recipientInput, setRecipientInput] = useState("");
@@ -125,6 +128,21 @@ export default function ComposePage() {
     } finally {
       setLoadingSenders(false);
     }
+  }
+
+  function getSenderInitials(sender: Sender) {
+    const source = sender.name?.trim() || sender.email.split("@")[0];
+    const parts = source.split(/[\\s._-]+/).filter(Boolean);
+
+    if (parts.length >= 2) {
+      return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+    }
+
+    return source.slice(0, 2).toUpperCase();
+  }
+
+  function getSelectedSender() {
+    return senders.find((sender) => sender.id === senderId) ?? null;
   }
 
   function addRecipient() {
@@ -474,37 +492,95 @@ export default function ComposePage() {
             From
           </span>
 
-          <div className="relative">
-            <select
-              value={senderId}
-              onChange={(event) =>
-                setSenderId(event.target.value)
-              }
-              disabled={loadingSenders}
-              className="appearance-none rounded-md bg-[#f5f7f6] px-4 py-2.5 pr-10 text-sm outline-none"
+          <div className="relative w-fit">
+            <button
+              type="button"
+              disabled={loadingSenders || senders.length === 0}
+              onClick={() => setShowSenderMenu((current) => !current)}
+              className="flex min-w-[290px] items-center gap-3 rounded-md bg-[#f5f7f6] px-3 py-2.5 text-left text-sm outline-none disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {senders.length === 0 && (
-                <option value="">
-                  {loadingSenders
-                    ? "Loading senders..."
-                    : "No sender available"}
-                </option>
+              {loadingSenders ? (
+                <span className="text-gray-500">
+                  Loading senders...
+                </span>
+              ) : getSelectedSender() ? (
+                <>
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#e8f5e9] text-xs font-semibold text-[#269b3b]">
+                    {getSelectedSender()?.photoUrl ? (
+                      <img
+                        src={getSelectedSender()!.photoUrl}
+                        alt=""
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      getSenderInitials(getSelectedSender()!)
+                    )}
+                  </span>
+
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium text-[#202124]">
+                      {getSelectedSender()?.name ||
+                        "Ethereal Sender"}
+                    </span>
+                    <span className="block truncate text-xs text-gray-500">
+                      {getSelectedSender()?.email}
+                    </span>
+                  </span>
+                </>
+              ) : (
+                <span className="text-gray-500">
+                  No sender available
+                </span>
               )}
 
-              {senders.map((sender) => (
-                <option
-                  key={sender.id}
-                  value={sender.id}
-                >
-                  {sender.email}
-                </option>
-              ))}
-            </select>
+              <ChevronDown
+                size={15}
+                className="ml-auto shrink-0 text-gray-400"
+              />
+            </button>
 
-            <ChevronDown
-              size={15}
-              className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-gray-400"
-            />
+            {showSenderMenu && senders.length > 0 && (
+              <div className="absolute left-0 top-[calc(100%+6px)] z-40 w-full min-w-[290px] overflow-hidden rounded-lg border border-[#e5e5e5] bg-white p-1 shadow-xl">
+                {senders.map((sender) => (
+                  <button
+                    key={sender.id}
+                    type="button"
+                    onClick={() => {
+                      setSenderId(sender.id);
+                      setShowSenderMenu(false);
+                    }}
+                    className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left hover:bg-[#f5f7f6]"
+                  >
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#e8f5e9] text-xs font-semibold text-[#269b3b]">
+                      {sender.photoUrl ? (
+                        <img
+                          src={sender.photoUrl}
+                          alt=""
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        getSenderInitials(sender)
+                      )}
+                    </span>
+
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-[#202124]">
+                        {sender.name || "Ethereal Sender"}
+                      </span>
+                      <span className="block truncate text-xs text-gray-500">
+                        {sender.email}
+                      </span>
+                    </span>
+
+                    {sender.id === senderId && (
+                      <span className="text-sm font-semibold text-[#269b3b]">
+                        ✓
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
