@@ -8,7 +8,8 @@ const SLACK_AUTHORIZE_URL =
 const SLACK_ACCESS_URL =
   "https://slack.com/api/oauth.v2.access";
 
-const STATE_TTL_SECONDS = 600;
+// OAuth state remains valid for 30 minutes.
+const STATE_TTL_SECONDS = 1800;
 
 interface SlackOAuthResponse {
   ok: boolean;
@@ -29,6 +30,9 @@ interface SlackOAuthResponse {
   };
 }
 
+/**
+ * Create Slack OAuth authorization URL
+ */
 export async function createSlackOAuthUrl(
   userId: string
 ) {
@@ -41,14 +45,41 @@ export async function createSlackOAuthUrl(
     );
   }
 
+  // Generate a cryptographically secure OAuth state.
   const state = crypto.randomBytes(32).toString("hex");
 
+  const stateKey = `slack:oauth:state:${state}`;
+
+  /*
+   * Store the state in Redis instead of application memory.
+   *
+   * This is important for Railway because:
+   * - API can restart
+   * - multiple instances can exist
+   * - OAuth callback may reach another process
+   *
+   * Redis keeps the state shared and persistent.
+   */
   await redis.set(
-    `slack:oauth:state:${state}`,
+    stateKey,
     userId,
     "EX",
     STATE_TTL_SECONDS
   );
+
+  /*
+   * Verify that Redis actually stored the state.
+   * This is temporary diagnostic logging and does not expose
+   * the Slack client secret, access token, or webhook URL.
+   */
+  const storedUserId = await redis.get(stateKey);
+
+  console.log("Slack OAuth state created:", {
+    state,
+    userId,
+    storedSuccessfully: storedUserId === userId,
+    ttlSeconds: STATE_TTL_SECONDS,
+  });
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -57,26 +88,52 @@ export async function createSlackOAuthUrl(
     state,
   });
 
-  return `${SLACK_AUTHORIZE_URL}?${params.toString()}`;
+  const authorizationUrl =
+    `${SLACK_AUTHORIZE_URL}?${params.toString()}`;
+
+  return authorizationUrl;
 }
 
+/**
+ * Handle Slack OAuth callback
+ */
 export async function handleSlackOAuthCallback(
   code: string,
   state: string
 ) {
   const clientId = process.env.SLACK_CLIENT_ID;
-  const clientSecret = process.env.SLACK_CLIENT_SECRET;
-  const redirectUri = process.env.SLACK_REDIRECT_URI;
+  const clientSecret =
+    process.env.SLACK_CLIENT_SECRET;
+  const redirectUri =
+    process.env.SLACK_REDIRECT_URI;
 
-  if (!clientId || !clientSecret || !redirectUri) {
+  if (
+    !clientId ||
+    !clientSecret ||
+    !redirectUri
+  ) {
     throw new Error(
       "Slack OAuth environment variables are missing"
     );
   }
 
+  if (!state) {
+    throw new Error(
+      "Slack OAuth state is missing"
+    );
+  }
+
   const stateKey = `slack:oauth:state:${state}`;
 
+  /*
+   * Retrieve the user ID associated with this OAuth state.
+   */
   const userId = await redis.get(stateKey);
+
+  console.log("Slack OAuth state checked:", {
+    state,
+    stateFound: Boolean(userId),
+  });
 
   if (!userId) {
     throw new Error(
@@ -84,25 +141,38 @@ export async function handleSlackOAuthCallback(
     );
   }
 
-  // OAuth state can only be used once.
+  /*
+   * OAuth state is single-use.
+   *
+   * Delete it immediately after successful lookup so that
+   * the same callback cannot be replayed.
+   */
   await redis.del(stateKey);
 
+  /*
+   * Exchange Slack authorization code for access token.
+   */
   const basicAuth = Buffer.from(
     `${clientId}:${clientSecret}`
   ).toString("base64");
 
-  const response = await fetch(SLACK_ACCESS_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basicAuth}`,
-      "Content-Type":
-        "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      code,
-      redirect_uri: redirectUri,
-    }),
-  });
+  const response = await fetch(
+    SLACK_ACCESS_URL,
+    {
+      method: "POST",
+
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        "Content-Type":
+          "application/x-www-form-urlencoded",
+      },
+
+      body: new URLSearchParams({
+        code,
+        redirect_uri: redirectUri,
+      }),
+    }
+  );
 
   const data =
     (await response.json()) as SlackOAuthResponse;
@@ -115,6 +185,9 @@ export async function handleSlackOAuthCallback(
     );
   }
 
+  /*
+   * Validate required Slack response fields.
+   */
   if (
     !data.access_token ||
     !data.team?.id ||
@@ -125,6 +198,10 @@ export async function handleSlackOAuthCallback(
     );
   }
 
+  /*
+   * The incoming-webhook scope should provide the
+   * webhook URL.
+   */
   const webhookUrl =
     data.incoming_webhook?.url ?? null;
 
@@ -134,6 +211,9 @@ export async function handleSlackOAuthCallback(
     );
   }
 
+  /*
+   * Save/update Slack connection in PostgreSQL.
+   */
   await pool.query(
     `
     INSERT INTO slack_connections
@@ -164,14 +244,28 @@ export async function handleSlackOAuthCallback(
     ]
   );
 
+  console.log(
+    "Slack OAuth connection saved successfully:",
+    {
+      userId,
+      teamId: data.team.id,
+      teamName: data.team.name,
+    }
+  );
+
   return {
     teamId: data.team.id,
+
     teamName: data.team.name,
+
     channel:
       data.incoming_webhook?.channel ?? null,
   };
 }
 
+/**
+ * Get Slack connection for a user
+ */
 export async function getSlackConnection(
   userId: string
 ) {
@@ -193,40 +287,61 @@ export async function getSlackConnection(
 
   return result.rows[0] ?? null;
 }
+
+/**
+ * Send Slack notification when sender hourly
+ * email limit is reached.
+ */
 export async function notifySlackHourlyLimitReached(
   userId: string,
   senderEmail: string,
   hourlyLimit: number
 ) {
   try {
-    const connectionResult = await pool.query(
-      `
-      SELECT webhook_url
-      FROM slack_connections
-      WHERE user_id = $1
-      `,
-      [userId]
-    );
+    const connectionResult =
+      await pool.query(
+        `
+        SELECT webhook_url
+        FROM slack_connections
+        WHERE user_id = $1
+        `,
+        [userId]
+      );
 
-    const webhookUrl = connectionResult.rows[0]?.webhook_url;
+    const webhookUrl =
+      connectionResult.rows[0]?.webhook_url;
 
-    // Slack is not connected.
-    // Do not break email processing.
+    /*
+     * Slack is not connected.
+     *
+     * Email processing must continue normally.
+     */
     if (!webhookUrl) {
       console.log(
         `Slack not connected for user ${userId}. Skipping notification.`
       );
+
       return;
     }
 
-    // Prevent duplicate notifications from multiple jobs/workers.
+    /*
+     * Create an hourly bucket.
+     *
+     * This prevents multiple workers from sending
+     * duplicate notifications during the same hour.
+     */
     const hourBucket = Math.floor(
-      Date.now() / (60 * 60 * 1000)
+      Date.now() /
+        (60 * 60 * 1000)
     );
 
     const notificationKey =
       `slack:hourly-limit-notified:${userId}:${senderEmail}:${hourBucket}`;
 
+    /*
+     * NX means:
+     * Only the first worker gets the lock.
+     */
     const acquired = await redis.set(
       notificationKey,
       "1",
@@ -235,7 +350,9 @@ export async function notifySlackHourlyLimitReached(
       "NX"
     );
 
-    // Another worker already sent this notification.
+    /*
+     * Another worker already sent the notification.
+     */
     if (!acquired) {
       return;
     }
@@ -248,18 +365,25 @@ export async function notifySlackHourlyLimitReached(
         `Queued emails will continue in the next available hour.`,
     };
 
-    const response = await fetch(webhookUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(message),
-    });
+    const response = await fetch(
+      webhookUrl,
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type":
+            "application/json",
+        },
+
+        body: JSON.stringify(message),
+      }
+    );
 
     if (!response.ok) {
       console.error(
         `Slack notification failed: ${response.status}`
       );
+
       return;
     }
 
@@ -267,7 +391,10 @@ export async function notifySlackHourlyLimitReached(
       `Slack hourly limit notification sent for ${senderEmail}`
     );
   } catch (error) {
-    // Slack failure must never crash the email worker.
+    /*
+     * Slack failures must NEVER crash
+     * the email worker.
+     */
     console.error(
       "Slack notification error:",
       error
