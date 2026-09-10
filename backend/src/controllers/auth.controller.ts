@@ -1,0 +1,152 @@
+import { Request, Response } from "express";
+
+import {
+  verifyGoogleToken,
+  findOrCreateGoogleUser,
+} from "../services/google-auth.service";
+
+import { createAuthToken } from "../services/auth.service";
+
+import pool from "../config/db";
+
+import { AuthenticatedRequest } from "../middleware/auth.middleware";
+
+const AUTH_COOKIE_NAME = "auth_token";
+
+export async function googleLogin(
+  req: Request,
+  res: Response
+) {
+  try {
+    const { credential } = req.body;
+
+    if (
+      typeof credential !== "string" ||
+      !credential.trim()
+    ) {
+      return res.status(400).json({
+        message: "Google credential is required",
+      });
+    }
+
+    // Verify Google ID token
+    const googleUser =
+      await verifyGoogleToken(credential);
+
+    // Find existing user or create a new user
+    const user =
+      await findOrCreateGoogleUser(googleUser);
+
+    // Create application JWT
+    const token = createAuthToken(user.id);
+
+    /*
+     * Store JWT in an HTTP-only cookie.
+     */
+    res.cookie(
+      AUTH_COOKIE_NAME,
+      token,
+      {
+        httpOnly: true,
+
+        secure:
+          process.env.NODE_ENV === "production",
+
+        sameSite:
+          process.env.NODE_ENV === "production"
+            ? "none"
+            : "lax",
+
+        maxAge:
+          7 * 24 * 60 * 60 * 1000,
+
+        path: "/",
+      }
+    );
+
+    return res.status(200).json({
+      message: "Google login successful",
+
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Google login failed:",
+      error
+    );
+
+    return res.status(401).json({
+      message: "Google authentication failed",
+    });
+  }
+}
+
+/*
+ * ---------------------------------------------------------
+ * Get Current Authenticated User
+ * ---------------------------------------------------------
+ */
+
+export async function getCurrentUser(
+  req: AuthenticatedRequest,
+  res: Response
+) {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({
+        message: "Authentication required",
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        email,
+        name,
+        created_at
+      FROM users
+      WHERE id = $1
+      `,
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({
+        message: "User not found",
+      });
+    }
+
+    return res.status(200).json({
+      user: result.rows[0],
+    });
+  } catch (error) {
+    console.error(
+      "Get current user error:",
+      error
+    );
+
+    return res.status(500).json({
+      message: "Failed to fetch current user",
+    });
+  }
+}
+
+export function logout(req: Request, res: Response) {
+  res.clearCookie(AUTH_COOKIE_NAME, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    path: "/",
+  });
+
+  return res.status(200).json({
+    message: "Logged out successfully",
+  });
+}
