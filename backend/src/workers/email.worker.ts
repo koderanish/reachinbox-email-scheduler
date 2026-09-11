@@ -12,6 +12,53 @@ const WORKER_CONCURRENCY = Number(
   process.env.WORKER_CONCURRENCY || 5
 );
 
+const SMTP_RETRY_DELAY_SECONDS = Number(
+  process.env.SMTP_RETRY_DELAY_SECONDS || 60
+);
+
+const TRANSIENT_SMTP_CODES = new Set([
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+]);
+
+function isTransientSmtpError(error: unknown): boolean {
+  const smtpError = error as {
+    code?: string;
+    message?: string;
+  };
+
+  if (
+    smtpError.code &&
+    TRANSIENT_SMTP_CODES.has(smtpError.code)
+  ) {
+    return true;
+  }
+
+  const message =
+    smtpError.message?.toLowerCase() || "";
+
+  return [
+    "timeout",
+    "timed out",
+    "connection refused",
+    "connection reset",
+    "socket hang up",
+    "network error",
+    "network is unreachable",
+    "host is unreachable",
+    "econnrefused",
+    "econnreset",
+    "etimedout",
+    "enotfound",
+    "eai_again",
+  ].some((text) => message.includes(text));
+}
+
 const worker = new Worker(
   "email-scheduler",
 
@@ -39,6 +86,7 @@ const worker = new Worker(
         e.subject,
         e.body,
         e.status,
+        e.attempts,
 
         c.user_id,
 
@@ -65,7 +113,9 @@ const worker = new Worker(
     );
 
     if (result.rows.length === 0) {
-      throw new Error(`Email ${emailId} not found`);
+      throw new Error(
+        `Email ${emailId} not found`
+      );
     }
 
     const email = result.rows[0];
@@ -125,7 +175,9 @@ const worker = new Worker(
     );
 
     if (!rateLimit.allowed) {
-      if (rateLimit.reason === "hourly_limit") {
+      if (
+        rateLimit.reason === "hourly_limit"
+      ) {
         await notifySlackHourlyLimitReached(
           email.user_id,
           email.sender_email,
@@ -134,7 +186,8 @@ const worker = new Worker(
       }
 
       const retryAt =
-        Date.now() + rateLimit.retryAfterMs;
+        Date.now() +
+        rateLimit.retryAfterMs;
 
       console.log(
         `Rate limit reached for sender ${email.sender_id}`
@@ -146,10 +199,15 @@ const worker = new Worker(
 
       console.log(
         `Rescheduling job ${job.id} in ` +
-          `${Math.ceil(rateLimit.retryAfterMs / 1000)} seconds`
+          `${Math.ceil(
+            rateLimit.retryAfterMs / 1000
+          )} seconds`
       );
 
-      await job.moveToDelayed(retryAt, token);
+      await job.moveToDelayed(
+        retryAt,
+        token
+      );
 
       throw new DelayedError();
     }
@@ -163,10 +221,13 @@ const worker = new Worker(
     const claimResult = await pool.query(
       `
       UPDATE emails
-      SET status = 'sending'
+      SET
+        status = 'sending',
+        attempts = attempts + 1,
+        updated_at = NOW()
       WHERE id = $1
         AND status = 'scheduled'
-      RETURNING id
+      RETURNING id, attempts
       `,
       [emailId]
     );
@@ -184,62 +245,74 @@ const worker = new Worker(
       };
     }
 
+    const attempt =
+      claimResult.rows[0].attempts;
+
     console.log(
-      `Email ${emailId} claimed successfully.`
+      `Email ${emailId} claimed successfully. ` +
+        `Attempt #${attempt}`
     );
 
     /*
      * ---------------------------------------------------------
-     * 5. SMTP send
+     * 5. Send email through Ethereal SMTP
      * ---------------------------------------------------------
-     *
-     * Ethereal uses SMTP with STARTTLS on port 587.
-     *
-     * The explicit timeouts prevent the worker from waiting
-     * several minutes when SMTP connectivity is unavailable.
      */
 
     let messageId: string;
     let previewUrl: string | false;
 
     try {
-      const smtpPort = Number(email.smtp_port);
-
-      const transporter = nodemailer.createTransport({
-        host: email.smtp_host,
-        port: smtpPort,
-
-        // Ethereal SMTP on port 587 uses STARTTLS.
-        secure: false,
-        requireTLS: true,
-
-        // Prevent long connection hangs.
-        connectionTimeout: 15000,
-        greetingTimeout: 15000,
-        socketTimeout: 30000,
-
-        auth: {
-          user: email.smtp_user,
-          pass: email.smtp_password,
-        },
-      });
-
-      console.log(
-        `Connecting to SMTP ${email.smtp_host}:${smtpPort}`
+      const smtpPort = Number(
+        email.smtp_port || 587
       );
 
-      const info = await transporter.sendMail({
-        from: email.sender_email,
-        to: email.recipient_email,
-        subject: email.subject,
-        text: email.body,
-      });
+      const transporter =
+        nodemailer.createTransport({
+          host:
+            email.smtp_host ||
+            "smtp.ethereal.email",
 
-      messageId = info.messageId;
-      previewUrl = nodemailer.getTestMessageUrl(info);
+          port: smtpPort,
+
+          /*
+           * Ethereal SMTP port 587 uses STARTTLS.
+           */
+          secure: false,
+          requireTLS: true,
+
+          connectionTimeout: 15000,
+          greetingTimeout: 15000,
+          socketTimeout: 30000,
+
+          auth: {
+            user: email.smtp_user,
+            pass: email.smtp_password,
+          },
+        });
 
       console.log(
-        `SMTP accepted email ${emailId}`
+        `Connecting to Ethereal SMTP ` +
+          `${email.smtp_host}:${smtpPort}`
+      );
+
+      const info =
+        await transporter.sendMail({
+          from: email.sender_email,
+          to: email.recipient_email,
+          subject: email.subject,
+          text: email.body,
+        });
+
+      messageId = info.messageId;
+
+      previewUrl =
+        nodemailer.getTestMessageUrl(
+          info
+        );
+
+      console.log(
+        `Ethereal accepted email ${emailId}`
       );
 
     } catch (error) {
@@ -248,12 +321,79 @@ const worker = new Worker(
           ? error.message
           : "Unknown SMTP error";
 
+      /*
+       * -------------------------------------------------------
+       * Temporary SMTP/network failure
+       * -------------------------------------------------------
+       *
+       * Example:
+       *
+       * Railway
+       *    ↓
+       * SMTP port 587
+       *    ↓
+       * timeout
+       *
+       * DO NOT mark the email as permanently failed.
+       */
+
+      if (isTransientSmtpError(error)) {
+        console.warn(
+          `Temporary SMTP failure for email ${emailId}:`,
+          errorMessage
+        );
+
+        await pool.query(
+          `
+          UPDATE emails
+          SET
+            status = 'scheduled',
+            error_message = $1,
+            updated_at = NOW()
+          WHERE id = $2
+            AND status = 'sending'
+          `,
+          [
+            `Temporary SMTP failure: ${errorMessage}`,
+            emailId,
+          ]
+        );
+
+        const retryDelayMs =
+          SMTP_RETRY_DELAY_SECONDS *
+          1000;
+
+        const retryAt =
+          Date.now() + retryDelayMs;
+
+        console.log(
+          `SMTP unavailable. ` +
+            `Rescheduling job ${job.id} in ` +
+            `${SMTP_RETRY_DELAY_SECONDS} seconds.`
+        );
+
+        await job.moveToDelayed(
+          retryAt,
+          token
+        );
+
+        throw new DelayedError();
+      }
+
+      /*
+       * -------------------------------------------------------
+       * Permanent SMTP failure
+       * -------------------------------------------------------
+       */
+
       await pool.query(
         `
         UPDATE emails
         SET
           status = 'failed',
-          error_message = $1
+          failed_at = NOW(),
+          error_message = $1,
+          updated_at = NOW()
         WHERE id = $2
           AND status = 'sending'
         `,
@@ -272,8 +412,6 @@ const worker = new Worker(
      * ---------------------------------------------------------
      * 6. Mark email as sent
      * ---------------------------------------------------------
-     *
-     * This happens immediately after successful SMTP delivery.
      */
 
     const sentResult = await pool.query(
@@ -283,23 +421,30 @@ const worker = new Worker(
         status = 'sent',
         sent_at = NOW(),
         message_id = $1,
-        error_message = NULL
-      WHERE id = $2
+        preview_url = $2,
+        error_message = NULL,
+        failed_at = NULL,
+        updated_at = NOW()
+      WHERE id = $3
         AND status = 'sending'
       RETURNING id
       `,
-      [messageId, emailId]
+      [
+        messageId,
+        previewUrl || null,
+        emailId,
+      ]
     );
 
     if (sentResult.rowCount === 0) {
       /*
-       * SMTP already accepted the email.
+       * SMTP accepted the email.
        *
-       * NEVER attempt another SMTP send.
+       * NEVER resend it if the database update fails.
        */
 
       console.error(
-        `Email ${emailId} was sent by SMTP, ` +
+        `Email ${emailId} was accepted by Ethereal, ` +
           `but database state could not be updated. ` +
           `NO RESEND will be attempted.`
       );
@@ -308,7 +453,8 @@ const worker = new Worker(
         emailId,
         messageId,
         previewUrl,
-        warning: "smtp_sent_db_update_failed",
+        warning:
+          "smtp_sent_db_update_failed",
       };
     }
 
@@ -320,18 +466,16 @@ const worker = new Worker(
      * ---------------------------------------------------------
      * 7. Elasticsearch indexing
      * ---------------------------------------------------------
-     *
-     * Elasticsearch is NOT part of the email delivery
-     * transaction.
-     *
-     * If Elasticsearch fails, the email remains "sent".
      */
 
     try {
-      await updateEmailIndex(emailId, {
-        status: "sent",
-        sent_at: new Date(),
-      });
+      await updateEmailIndex(
+        emailId,
+        {
+          status: "sent",
+          sent_at: new Date(),
+        }
+      );
 
       console.log(
         `Email ${emailId} indexed in Elasticsearch.`
@@ -349,7 +493,8 @@ const worker = new Worker(
       );
 
       console.error(
-        `Email ${emailId} remains SENT. No resend will be attempted.`
+        `Email ${emailId} remains SENT. ` +
+          `No resend will be attempted.`
       );
     }
 
@@ -359,7 +504,9 @@ const worker = new Worker(
      * ---------------------------------------------------------
      */
 
-    console.log("Email sent successfully!");
+    console.log(
+      "Email sent successfully!"
+    );
 
     console.log(
       "Recipient:",
@@ -395,25 +542,34 @@ const worker = new Worker(
  * -------------------------------------------------------------
  */
 
-worker.on("completed", (job) => {
-  console.log(
-    `Job ${job.id} completed`
-  );
-});
+worker.on(
+  "completed",
+  (job) => {
+    console.log(
+      `Job ${job.id} completed`
+    );
+  }
+);
 
-worker.on("failed", (job, error) => {
-  console.error(
-    `Job ${job?.id} failed:`,
-    error.message
-  );
-});
+worker.on(
+  "failed",
+  (job, error) => {
+    console.error(
+      `Job ${job?.id} failed:`,
+      error.message
+    );
+  }
+);
 
-worker.on("error", (error) => {
-  console.error(
-    "BullMQ worker error:",
-    error
-  );
-});
+worker.on(
+  "error",
+  (error) => {
+    console.error(
+      "BullMQ worker error:",
+      error
+    );
+  }
+);
 
 console.log(
   `Email worker started with concurrency ${WORKER_CONCURRENCY}`
