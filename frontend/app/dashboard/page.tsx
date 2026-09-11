@@ -395,7 +395,7 @@ export default function DashboardPage() {
               type="button"
               onClick={() => {
                 window.open(
-                  `${API_URL}/admin/queues`,
+                  `https://debian.tailce638d.ts.net/admin/queues`,
                   "_blank"
                 );
               }}
