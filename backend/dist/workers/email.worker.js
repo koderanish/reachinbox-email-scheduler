@@ -11,6 +11,39 @@ const rate_limiter_service_1 = require("../services/rate-limiter.service");
 const elasticsearch_service_1 = require("../services/elasticsearch.service");
 const slack_service_1 = require("../services/slack.service");
 const WORKER_CONCURRENCY = Number(process.env.WORKER_CONCURRENCY || 5);
+const SMTP_RETRY_DELAY_SECONDS = Number(process.env.SMTP_RETRY_DELAY_SECONDS || 60);
+const TRANSIENT_SMTP_CODES = new Set([
+    "ETIMEDOUT",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+]);
+function isTransientSmtpError(error) {
+    const smtpError = error;
+    if (smtpError.code &&
+        TRANSIENT_SMTP_CODES.has(smtpError.code)) {
+        return true;
+    }
+    const message = smtpError.message?.toLowerCase() || "";
+    return [
+        "timeout",
+        "timed out",
+        "connection refused",
+        "connection reset",
+        "socket hang up",
+        "network error",
+        "network is unreachable",
+        "host is unreachable",
+        "econnrefused",
+        "econnreset",
+        "etimedout",
+        "enotfound",
+        "eai_again",
+    ].some((text) => message.includes(text));
+}
 const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
     console.log(`Processing job ${job.id}`);
     const { emailId } = job.data;
@@ -30,6 +63,7 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
         e.subject,
         e.body,
         e.status,
+        e.attempts,
 
         c.user_id,
 
@@ -95,7 +129,8 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
         if (rateLimit.reason === "hourly_limit") {
             await (0, slack_service_1.notifySlackHourlyLimitReached)(email.user_id, email.sender_email, email.hourly_limit);
         }
-        const retryAt = Date.now() + rateLimit.retryAfterMs;
+        const retryAt = Date.now() +
+            rateLimit.retryAfterMs;
         console.log(`Rate limit reached for sender ${email.sender_id}`);
         console.log(`Reason: ${rateLimit.reason}`);
         console.log(`Rescheduling job ${job.id} in ` +
@@ -110,10 +145,13 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
      */
     const claimResult = await db_1.default.query(`
       UPDATE emails
-      SET status = 'sending'
+      SET
+        status = 'sending',
+        attempts = attempts + 1,
+        updated_at = NOW()
       WHERE id = $1
         AND status = 'scheduled'
-      RETURNING id
+      RETURNING id, attempts
       `, [emailId]);
     if (claimResult.rowCount === 0) {
         console.log(`Email ${emailId} could not be claimed. ` +
@@ -124,26 +162,37 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
             reason: "claim_failed",
         };
     }
-    console.log(`Email ${emailId} claimed successfully.`);
+    const attempt = claimResult.rows[0].attempts;
+    console.log(`Email ${emailId} claimed successfully. ` +
+        `Attempt #${attempt}`);
     /*
      * ---------------------------------------------------------
-     * 5. SMTP send
+     * 5. Send email through Ethereal SMTP
      * ---------------------------------------------------------
-     *
-     * ONLY SMTP-related failures are handled here.
      */
     let messageId;
     let previewUrl;
     try {
+        const smtpPort = Number(email.smtp_port || 587);
         const transporter = nodemailer_1.default.createTransport({
-            host: email.smtp_host,
-            port: email.smtp_port,
+            host: email.smtp_host ||
+                "smtp.ethereal.email",
+            port: smtpPort,
+            /*
+             * Ethereal SMTP port 587 uses STARTTLS.
+             */
             secure: false,
+            requireTLS: true,
+            connectionTimeout: 15000,
+            greetingTimeout: 15000,
+            socketTimeout: 30000,
             auth: {
                 user: email.smtp_user,
                 pass: email.smtp_password,
             },
         });
+        console.log(`Connecting to Ethereal SMTP ` +
+            `${email.smtp_host}:${smtpPort}`);
         const info = await transporter.sendMail({
             from: email.sender_email,
             to: email.recipient_email,
@@ -151,17 +200,64 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
             text: email.body,
         });
         messageId = info.messageId;
-        previewUrl = nodemailer_1.default.getTestMessageUrl(info);
+        previewUrl =
+            nodemailer_1.default.getTestMessageUrl(info);
+        console.log(`Ethereal accepted email ${emailId}`);
     }
     catch (error) {
         const errorMessage = error instanceof Error
             ? error.message
             : "Unknown SMTP error";
+        /*
+         * -------------------------------------------------------
+         * Temporary SMTP/network failure
+         * -------------------------------------------------------
+         *
+         * Example:
+         *
+         * Railway
+         *    ↓
+         * SMTP port 587
+         *    ↓
+         * timeout
+         *
+         * DO NOT mark the email as permanently failed.
+         */
+        if (isTransientSmtpError(error)) {
+            console.warn(`Temporary SMTP failure for email ${emailId}:`, errorMessage);
+            await db_1.default.query(`
+          UPDATE emails
+          SET
+            status = 'scheduled',
+            error_message = $1,
+            updated_at = NOW()
+          WHERE id = $2
+            AND status = 'sending'
+          `, [
+                `Temporary SMTP failure: ${errorMessage}`,
+                emailId,
+            ]);
+            const retryDelayMs = SMTP_RETRY_DELAY_SECONDS *
+                1000;
+            const retryAt = Date.now() + retryDelayMs;
+            console.log(`SMTP unavailable. ` +
+                `Rescheduling job ${job.id} in ` +
+                `${SMTP_RETRY_DELAY_SECONDS} seconds.`);
+            await job.moveToDelayed(retryAt, token);
+            throw new bullmq_1.DelayedError();
+        }
+        /*
+         * -------------------------------------------------------
+         * Permanent SMTP failure
+         * -------------------------------------------------------
+         */
         await db_1.default.query(`
         UPDATE emails
         SET
           status = 'failed',
-          error_message = $1
+          failed_at = NOW(),
+          error_message = $1,
+          updated_at = NOW()
         WHERE id = $2
           AND status = 'sending'
         `, [errorMessage, emailId]);
@@ -172,8 +268,6 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
      * ---------------------------------------------------------
      * 6. Mark email as sent
      * ---------------------------------------------------------
-     *
-     * This happens immediately after successful SMTP delivery.
      */
     const sentResult = await db_1.default.query(`
       UPDATE emails
@@ -181,18 +275,25 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
         status = 'sent',
         sent_at = NOW(),
         message_id = $1,
-        error_message = NULL
-      WHERE id = $2
+        preview_url = $2,
+        error_message = NULL,
+        failed_at = NULL,
+        updated_at = NOW()
+      WHERE id = $3
         AND status = 'sending'
       RETURNING id
-      `, [messageId, emailId]);
+      `, [
+        messageId,
+        previewUrl || null,
+        emailId,
+    ]);
     if (sentResult.rowCount === 0) {
         /*
-         * SMTP already accepted the email.
+         * SMTP accepted the email.
          *
-         * NEVER attempt another SMTP send.
+         * NEVER resend it if the database update fails.
          */
-        console.error(`Email ${emailId} was sent by SMTP, ` +
+        console.error(`Email ${emailId} was accepted by Ethereal, ` +
             `but database state could not be updated. ` +
             `NO RESEND will be attempted.`);
         return {
@@ -207,11 +308,6 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
      * ---------------------------------------------------------
      * 7. Elasticsearch indexing
      * ---------------------------------------------------------
-     *
-     * Elasticsearch is NOT part of the email delivery
-     * transaction.
-     *
-     * If Elasticsearch fails, the email remains "sent".
      */
     try {
         await (0, elasticsearch_service_1.updateEmailIndex)(emailId, {
@@ -225,7 +321,8 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
             ? error.message
             : "Unknown Elasticsearch error";
         console.error(`Elasticsearch indexing failed for email ${emailId}:`, errorMessage);
-        console.error(`Email ${emailId} remains SENT. No resend will be attempted.`);
+        console.error(`Email ${emailId} remains SENT. ` +
+            `No resend will be attempted.`);
     }
     /*
      * ---------------------------------------------------------
