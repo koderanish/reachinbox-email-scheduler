@@ -10,6 +10,30 @@ const google_auth_service_1 = require("../services/google-auth.service");
 const auth_service_1 = require("../services/auth.service");
 const db_1 = __importDefault(require("../config/db"));
 const AUTH_COOKIE_NAME = "auth_token";
+/*
+ * Cookie transport must match how the request actually arrived:
+ * browsers reject Secure cookies over plain HTTP, and require
+ * Secure for SameSite=None. Behind an HTTPS proxy (Vercel rewrite,
+ * Tailscale Funnel) X-Forwarded-Proto carries the real scheme.
+ * Explicit env vars still win when set.
+ */
+function getCookieFlags(req) {
+    if (process.env.COOKIE_SECURE ||
+        process.env.COOKIE_SAMESITE) {
+        const secure = process.env.COOKIE_SECURE === "true";
+        return {
+            secure,
+            sameSite: process.env.COOKIE_SAMESITE ||
+                (secure ? "none" : "lax"),
+        };
+    }
+    const isHttps = req.secure ||
+        req.headers["x-forwarded-proto"] === "https";
+    return {
+        secure: isHttps,
+        sameSite: isHttps ? "none" : "lax",
+    };
+}
 async function googleLogin(req, res) {
     try {
         const { credential } = req.body;
@@ -25,15 +49,14 @@ async function googleLogin(req, res) {
         const user = await (0, google_auth_service_1.findOrCreateGoogleUser)(googleUser);
         // Create application JWT
         const token = (0, auth_service_1.createAuthToken)(user.id);
+        const cookieFlags = getCookieFlags(req);
         /*
          * Store JWT in an HTTP-only cookie.
          */
         res.cookie(AUTH_COOKIE_NAME, token, {
             httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: process.env.NODE_ENV === "production"
-                ? "none"
-                : "lax",
+            secure: cookieFlags.secure,
+            sameSite: cookieFlags.sameSite,
             maxAge: 7 * 24 * 60 * 60 * 1000,
             path: "/",
         });
@@ -92,10 +115,11 @@ async function getCurrentUser(req, res) {
     }
 }
 function logout(req, res) {
+    const cookieFlags = getCookieFlags(req);
     res.clearCookie(AUTH_COOKIE_NAME, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+        secure: cookieFlags.secure,
+        sameSite: cookieFlags.sameSite,
         path: "/",
     });
     return res.status(200).json({

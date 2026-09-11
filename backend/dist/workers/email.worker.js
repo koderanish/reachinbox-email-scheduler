@@ -182,7 +182,7 @@ const worker = new bullmq_1.Worker("email-scheduler", async (job, token) => {
              * Ethereal SMTP port 587 uses STARTTLS.
              */
             secure: false,
-            requireTLS: true,
+            requireTLS: false,
             connectionTimeout: 15000,
             greetingTimeout: 15000,
             socketTimeout: 30000,

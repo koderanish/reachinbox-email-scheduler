@@ -9,6 +9,9 @@ dotenv_1.default.config();
 const pool = new pg_1.Pool({
     connectionString: process.env.DATABASE_URL,
 });
+pool.on("connect", () => {
+    console.log("DATABASE CONNECTED!");
+});
 pool.on("error", (error) => {
     console.error("Unexpected PostgreSQL error:", error);
 });

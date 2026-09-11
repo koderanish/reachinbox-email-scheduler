@@ -44,7 +44,7 @@ app.use(cookieParser());
 
 app.use(
   "/admin/queues",
-  bullBoardAdapter.getRouter()
+  bullBoardAdapter
 );
 
 /*

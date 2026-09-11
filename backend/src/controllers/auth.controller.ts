@@ -13,6 +13,45 @@ import { AuthenticatedRequest } from "../middleware/auth.middleware";
 
 const AUTH_COOKIE_NAME = "auth_token";
 
+/*
+ * Cookie transport must match how the request actually arrived:
+ * browsers reject Secure cookies over plain HTTP, and require
+ * Secure for SameSite=None. Behind an HTTPS proxy (Vercel rewrite,
+ * Tailscale Funnel) X-Forwarded-Proto carries the real scheme.
+ * Explicit env vars still win when set.
+ */
+function getCookieFlags(req: Request): {
+  secure: boolean;
+  sameSite: "lax" | "strict" | "none";
+} {
+  if (
+    process.env.COOKIE_SECURE ||
+    process.env.COOKIE_SAMESITE
+  ) {
+    const secure =
+      process.env.COOKIE_SECURE === "true";
+
+    return {
+      secure,
+      sameSite:
+        (process.env.COOKIE_SAMESITE as
+          | "lax"
+          | "strict"
+          | "none") ||
+        (secure ? "none" : "lax"),
+    };
+  }
+
+  const isHttps =
+    req.secure ||
+    req.headers["x-forwarded-proto"] === "https";
+
+  return {
+    secure: isHttps,
+    sameSite: isHttps ? "none" : "lax",
+  };
+}
+
 export async function googleLogin(
   req: Request,
   res: Response
@@ -40,6 +79,8 @@ export async function googleLogin(
     // Create application JWT
     const token = createAuthToken(user.id);
 
+    const cookieFlags = getCookieFlags(req);
+
     /*
      * Store JWT in an HTTP-only cookie.
      */
@@ -49,13 +90,9 @@ export async function googleLogin(
       {
         httpOnly: true,
 
-        secure:
-          process.env.NODE_ENV === "production",
+        secure: cookieFlags.secure,
 
-        sameSite:
-          process.env.NODE_ENV === "production"
-            ? "none"
-            : "lax",
+        sameSite: cookieFlags.sameSite,
 
         maxAge:
           7 * 24 * 60 * 60 * 1000,
@@ -139,10 +176,12 @@ export async function getCurrentUser(
 }
 
 export function logout(req: Request, res: Response) {
+  const cookieFlags = getCookieFlags(req);
+
   res.clearCookie(AUTH_COOKIE_NAME, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    secure: cookieFlags.secure,
+    sameSite: cookieFlags.sameSite,
     path: "/",
   });
 

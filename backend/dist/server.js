@@ -28,7 +28,7 @@ app.use((0, cookie_parser_1.default)());
 /*
  * BullMQ Dashboard
  */
-app.use("/admin/queues", bull_board_1.default.getRouter());
+app.use("/admin/queues", bull_board_1.default);
 /*
  * API Routes
  */
