@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Script from "next/script";
 
+import { API_URL } from "@/lib/api";
+
 declare global {
   interface Window {
     google?: {
@@ -40,7 +42,7 @@ export default function LoginPage() {
       setError("");
 
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/api/auth/google`,
+        `${API_URL}/api/auth/google`,
         {
           method: "POST",
           headers: {

@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+
+import { API_URL } from "@/lib/api";
 import {
   ArrowLeft,
   Paperclip,
@@ -11,8 +13,6 @@ import {
   X,
   Users,
 } from "lucide-react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 type Sender = {
   id: string;

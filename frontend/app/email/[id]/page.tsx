@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+
+import { API_URL } from "@/lib/api";
 import {
   ArrowLeft,
   Clock3,
@@ -9,8 +11,6 @@ import {
   Send,
   User,
 } from "lucide-react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 type Email = {
   id: string;

@@ -6,8 +6,9 @@ import type { NextConfig } from "next";
  * to the backend, which may live on another machine (e.g. the
  * Tailscale host running the Docker stack).
  */
-const API_PROXY_TARGET =
-  process.env.API_PROXY_TARGET || "http://localhost:5001";
+const API_PROXY_TARGET = (
+  process.env.API_PROXY_TARGET || "http://localhost:5001"
+).replace(/\/+$/, "");
 
 const nextConfig: NextConfig = {
   async rewrites() {

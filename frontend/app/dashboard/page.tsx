@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+
+import { API_URL } from "@/lib/api";
 import {
   Clock3,
   Send,
@@ -14,8 +16,6 @@ import {
   MessageSquare,
   LogOut,
 } from "lucide-react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 type User = {
   id: string;
